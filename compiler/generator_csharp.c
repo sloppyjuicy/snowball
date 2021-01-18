@@ -418,6 +418,7 @@ static void generate_try(struct generator * g, struct node * p) {
 
     g->failure_label = new_label(g);
     g->label_used = 0;
+    str_clear(g->failure_str);
     if (keep_c) restore_string(p, g->failure_str, savevar);
 
     generate(g, p->left);
@@ -564,6 +565,7 @@ static void generate_GO(struct generator * g, struct node * p, int style) {
 
     g->failure_label = new_label(g);
     g->label_used = 0;
+    str_clear(g->failure_str);
     generate(g, p->left);
 
     if (style == 1) {
@@ -703,9 +705,17 @@ static void generate_hop(struct generator * g, struct node * p) {
     generate_AE(g, p->AE);
     w(g, ";~N");
 
-    g->S[0] = p->mode == m_forward ? "0" : "limit_backward";
-
-    write_failure_if(g, "~S0 > c || c > limit", p);
+    g->S[1] = p->mode == m_forward ? "> limit" : "< limit_backward";
+    g->S[2] = p->mode == m_forward ? "<" : ">";
+    if (p->AE->type == c_number) {
+        // Constant distance hop.
+        //
+        // No need to check for negative hop as that's converted to false by
+        // the analyser.
+        write_failure_if(g, "c ~S1", p);
+    } else {
+        write_failure_if(g, "c ~S1 || c ~S2 cursor", p);
+    }
     writef(g, "~Mcursor = c;~N", p);
     writef(g, "~}", p);
 }

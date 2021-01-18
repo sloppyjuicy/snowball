@@ -48,6 +48,10 @@ gofmt ?= gofmt
 go_src_main_dir = go
 go_src_dir = $(go_src_main_dir)/algorithms
 
+gprbuild ?= gprbuild
+ada_src_main_dir = ada
+ada_src_dir = $(ada_src_main_dir)/algorithms
+
 ICONV = iconv
 #ICONV = python ./iconv.py
 
@@ -73,7 +77,8 @@ COMPILER_SOURCES = compiler/space.c \
 		   compiler/generator_pascal.c \
 		   compiler/generator_python.c \
 		   compiler/generator_rust.c \
-		   compiler/generator_go.c
+		   compiler/generator_go.c \
+		   compiler/generator_ada.c
 
 COMPILER_HEADERS = compiler/header.h \
 		   compiler/syswords.h \
@@ -120,6 +125,7 @@ LIBSTEMMER_HEADERS = include/libstemmer.h libstemmer/modules.h libstemmer/module
 LIBSTEMMER_EXTRA = libstemmer/modules.txt libstemmer/libstemmer_c.in
 
 STEMWORDS_SOURCES = examples/stemwords.c
+STEMTEST_SOURCES = tests/stemtest.c
 
 PYTHON_STEMWORDS_SOURCE = python/stemwords.py
 
@@ -146,12 +152,16 @@ JS_SOURCES = $(libstemmer_algorithms:%=$(js_output_dir)/%-stemmer.js)
 RUST_SOURCES = $(libstemmer_algorithms:%=$(rust_src_dir)/%_stemmer.rs)
 GO_SOURCES = $(libstemmer_algorithms:%=$(go_src_dir)/%_stemmer.go) \
 	$(go_src_main_dir)/stemwords/algorithms.go
+ADA_SOURCES = $(libstemmer_algorithms:%=$(ada_src_dir)/stemmer-%.ads) \
+        $(libstemmer_algorithms:%=$(ada_src_dir)/stemmer-%.adb) \
+        $(ada_src_dir)/stemmer-factory.ads $(ada_src_dir)/stemmer-factory.adb
 
 COMPILER_OBJECTS=$(COMPILER_SOURCES:.c=.o)
 RUNTIME_OBJECTS=$(RUNTIME_SOURCES:.c=.o)
 LIBSTEMMER_OBJECTS=$(LIBSTEMMER_SOURCES:.c=.o)
 LIBSTEMMER_UTF8_OBJECTS=$(LIBSTEMMER_UTF8_SOURCES:.c=.o)
 STEMWORDS_OBJECTS=$(STEMWORDS_SOURCES:.c=.o)
+STEMTEST_OBJECTS=$(STEMTEST_SOURCES:.c=.o)
 C_LIB_OBJECTS = $(C_LIB_SOURCES:.c=.o)
 C_OTHER_OBJECTS = $(C_OTHER_SOURCES:.c=.o)
 JAVA_CLASSES = $(JAVA_SOURCES:.java=.class)
@@ -176,6 +186,7 @@ clean:
 	      $(PYTHON_SOURCES) \
 	      $(JS_SOURCES) \
 	      $(RUST_SOURCES) \
+	      $(ADA_SOURCES) \
               libstemmer/mkinc.mak libstemmer/mkinc_utf8.mak \
               libstemmer/libstemmer.c libstemmer/libstemmer_utf8.c \
 	      algorithms.mk
@@ -207,6 +218,9 @@ libstemmer.o: libstemmer/libstemmer.o $(RUNTIME_OBJECTS) $(C_LIB_OBJECTS)
 	$(AR) -cru $@ $^
 
 $(STEMWORDS_PROG): $(STEMWORDS_OBJECTS) libstemmer.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+stemtest: $(STEMTEST_OBJECTS) libstemmer.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 $(CSHARP_STEMWORDS_PROG): $(CSHARP_STEMWORDS_SOURCES) $(CSHARP_RUNTIME_SOURCES) $(CSHARP_SOURCES)
@@ -290,7 +304,7 @@ $(rust_src_dir)/%_stemmer.rs: algorithms/%.sbl $(SNOWBALLPROG)
 	echo "./snowball $< -rust -o $${o}"; \
 	./snowball $< -rust -o $${o}
 
-$(go_src_main_dir)/stemwords/algorithms.go:
+$(go_src_main_dir)/stemwords/algorithms.go: go/stemwords/generate.go libstemmer/modules.txt
 	@echo "Generating algorithms.go"
 	@cd go/stemwords && go generate
 
@@ -314,6 +328,13 @@ $(js_output_dir)/%-stemmer.js: algorithms/%.sbl $(SNOWBALLPROG)
 	echo "./snowball $< -js -o $${o}"; \
 	./snowball $< -js -o $${o}
 
+$(ada_src_dir)/stemmer-%.ads: algorithms/%.sbl snowball
+	@mkdir -p $(ada_src_dir)
+	@l=`echo "$<" | sed 's!\(.*\)\.sbl$$!\1!;s!^.*/!!'`; \
+	o="$(ada_src_dir)/stemmer-$${l}"; \
+	echo "./snowball $< -ada -o $${o}"; \
+	./snowball $< -ada -P $${l} -o $${o}
+
 # Make a full source distribution
 dist: dist_snowball dist_libstemmer_c dist_libstemmer_csharp dist_libstemmer_java dist_libstemmer_js dist_libstemmer_python
 
@@ -324,9 +345,9 @@ dist_snowball: $(COMPILER_SOURCES) $(COMPILER_HEADERS) \
 	    $(LIBSTEMMER_UTF8_SOURCES) \
             $(LIBSTEMMER_HEADERS) \
 	    $(LIBSTEMMER_EXTRA) \
-	    $(ALL_ALGORITHM_FILES) $(STEMWORDS_SOURCES) \
+	    $(ALL_ALGORITHM_FILES) $(STEMWORDS_SOURCES) $(STEMTEST_SOURCES) \
 	    $(COMMON_FILES) \
-	    GNUmakefile README doc/TODO libstemmer/mkmodules.pl
+	    GNUmakefile README.rst doc/TODO libstemmer/mkmodules.pl
 	destname=snowball_code; \
 	dest=dist/$${destname}; \
 	rm -rf $${dest} && \
@@ -368,7 +389,7 @@ dist_libstemmer_c: \
 	mkdir -p $${dest}/include && \
 	mv $${dest}/libstemmer/libstemmer.h $${dest}/include && \
 	(cd $${dest} && \
-	 echo "README" >> MANIFEST && \
+	 echo "README.rst" >> MANIFEST && \
 	 ls $(c_src_dir)/*.c $(c_src_dir)/*.h >> MANIFEST && \
 	 ls runtime/*.c runtime/*.h >> MANIFEST && \
 	 ls libstemmer/*.c libstemmer/*.h >> MANIFEST && \
@@ -458,17 +479,20 @@ dist_libstemmer_js: $(JS_SOURCES)
 	mkdir -p $${dest} && \
 	mkdir -p $${dest}/$(js_runtime_dir) && \
 	mkdir -p $${dest}/$(js_sample_dir) && \
-	cp -a doc/libstemmer_js_README $${dest}/README && \
+	cp -a doc/libstemmer_js_README $${dest}/README.rst && \
 	cp -a $(COMMON_FILES) $${dest} && \
 	cp -a $(JS_RUNTIME_SOURCES) $${dest}/$(js_runtime_dir) && \
 	cp -a $(JS_SAMPLE_SOURCES) $${dest}/$(js_sample_dir) && \
 	cp -a $(JS_SOURCES) $${dest}/$(js_runtime_dir) && \
 	(cd $${dest} && \
-	 ls README $(COMMON_FILES) $(js_runtime_dir)/*.js $(js_sample_dir)/*.js > MANIFEST) && \
+	 ls README.rst $(COMMON_FILES) $(js_runtime_dir)/*.js $(js_sample_dir)/*.js > MANIFEST) && \
 	(cd dist && tar zcf $${destname}.tgz $${destname}) && \
 	rm -rf $${dest}
 
-check: check_utf8 check_iso_8859_1 check_iso_8859_2 check_koi8r
+check: check_stemtest check_utf8 check_iso_8859_1 check_iso_8859_2 check_koi8r
+
+check_stemtest: stemtest
+	./stemtest
 
 check_utf8: $(libstemmer_algorithms:%=check_utf8_%)
 
@@ -671,5 +695,35 @@ update_version:
 		compiler/header.h \
 		csharp/Snowball/AssemblyInfo.cs \
 		python/setup.py
+
+check_ada: ada/bin/stemwords
+	$(MAKE) do_check_ada
+
+do_check_ada: $(libstemmer_algorithms:%=check_ada_%)
+
+check_ada_%: $(STEMMING_DATA_ABS)/%
+	@echo "Checking output of `echo $<|sed 's!.*/!!'` stemmer for Ada"
+	@cd ada && if test -f '$</voc.txt.gz' ; then \
+	  gzip -dc '$</voc.txt.gz' > tmp.in; \
+	  ./bin/stemwords `echo $<|sed 's!.*/!!'` tmp.in $(PWD)/tmp.txt; \
+	  rm tmp.in; \
+	else \
+	  ./bin/stemwords `echo $<|sed 's!.*/!!'` $</voc.txt $(PWD)/tmp.txt; \
+	fi
+	@if test -f '$</output.txt.gz' ; then \
+	  gzip -dc '$</output.txt.gz'|diff -u - tmp.txt; \
+	else \
+	  diff -u $</output.txt tmp.txt | head -300; \
+	fi
+	@rm tmp.txt
+
+$(ada_src_dir)/stemmer-factory.ads $(ada_src_dir)/stemmer-factory.adb: ada/bin/generate
+	cd $(ada_src_dir) && ../bin/generate $(libstemmer_algorithms)
+
+ada/bin/generate:
+	cd ada && $(gprbuild) -Pgenerate -p
+
+ada/bin/stemwords: $(ADA_SOURCES)
+	cd ada && $(gprbuild) -Pstemwords -p
 
 .SUFFIXES: .class .java
