@@ -20,15 +20,24 @@ typedef unsigned short symbol;
 extern symbol * create_b(int n);
 extern void report_b(FILE * out, const symbol * p);
 extern void lose_b(symbol * p);
-extern symbol * increase_capacity(symbol * p, int n);
-extern symbol * move_to_b(symbol * p, int n, const symbol * q);
-extern symbol * add_to_b(symbol * p, int n, const symbol * q);
+extern symbol * increase_capacity_b(symbol * p, int n);
+extern symbol * add_to_b(symbol * p, const symbol * q, int n);
 extern symbol * copy_b(const symbol * p);
-extern char * b_to_s(const symbol * p);
-extern symbol * add_s_to_b(symbol * p, const char * s);
+extern char * b_to_sz(const symbol * p);
+extern symbol * add_symbol_to_b(symbol * p, symbol ch);
 
-#define MOVE_TO_B(B, LIT) \
-    move_to_b(B, sizeof(LIT) / sizeof(LIT[0]), LIT)
+// These routines are like those above but work in byte instead of symbol.
+
+extern byte * create_s(int n);
+extern void report_s(FILE * out, const byte * p);
+extern void lose_s(byte * p);
+extern byte * increase_capacity_s(byte * p, int n);
+extern byte * copy_s(const byte * p);
+extern byte * add_s_to_s(byte * p, const char * s, int n);
+extern byte * add_sz_to_s(byte * p, const char * s);
+extern byte * add_char_to_s(byte * p, char ch);
+// "" LIT is a trick to make compilation fail if LIT is not a string literal.
+#define add_literal_to_s(P, LIT) add_s_to_s(P, "" LIT, sizeof(LIT) - 1)
 
 struct str; /* defined in space.c */
 
@@ -36,27 +45,28 @@ extern struct str * str_new(void);
 extern void str_delete(struct str * str);
 extern void str_append(struct str * str, const struct str * add);
 extern void str_append_ch(struct str * str, char add);
-extern void str_append_symbol(struct str * str, symbol add);
-extern void str_append_b(struct str * str, const symbol * q);
-extern void str_append_b_tail(struct str * str, const symbol * q, int skip);
+extern void str_append_s(struct str * str, const byte * q);
 extern void str_append_string(struct str * str, const char * s);
 extern void str_append_int(struct str * str, int i);
 extern void str_clear(struct str * str);
 extern void str_assign(struct str * str, const char * s);
 extern struct str * str_copy(const struct str * old);
-extern symbol * str_data(const struct str * str);
+extern byte * str_data(const struct str * str);
 extern int str_len(const struct str * str);
 extern int str_back(const struct str *str);
+extern void str_pop(const struct str *str);
+extern void output_str(FILE * outfile, struct str * str);
+
 extern int get_utf8(const symbol * p, int * slot);
 extern int put_utf8(int ch, symbol * p);
-extern void output_str(FILE * outfile, struct str * str);
 
 typedef enum { ENC_SINGLEBYTE, ENC_UTF8, ENC_WIDECHARS } enc;
 
+/* stringdef name and value */
 struct m_pair {
 
     struct m_pair * next;
-    symbol * name;
+    byte * name;
     symbol * value;
 
 };
@@ -65,10 +75,13 @@ struct m_pair {
 struct input {
 
     struct input * next;
-    symbol * p;
+    byte * p;
     int c;
     char * file;
-    int file_needs_freeing;
+    // -1 : Release file with: lose_s((byte *)file)
+    //  0 : We don't own file.
+    //  1 : Release file with: free(file)
+    int file_owned;
     int line_number;
 
 };
@@ -76,22 +89,45 @@ struct input {
 struct include {
 
     struct include * next;
-    symbol * b;
+    byte * s;
 
 };
 
 enum token_codes {
+    /* The relational operator token values are chosen such that we can
+     * invert the relation with a simple xor with 1.
+     */
+    c_gt = 0, c_le,
+    c_ge, c_lt,
+    c_eq, c_ne,
 
-#include "syswords2.h"
+    /* Other token values just need to be unique. */
+    c_among, c_and, c_as, c_assign, c_assignto, c_atleast,
+    c_atlimit, c_atmark, c_attach, c_backwardmode, c_backwards,
+    c_booleans, c_bra, c_comment1, c_comment2, c_cursor, c_debug,
+    c_decimal, c_define, c_delete, c_divide, c_divideassign, c_do,
+    c_dollar, c_externals, c_fail, c_false, c_for, c_get,
+    c_gopast, c_goto, c_groupings, c_hex, c_hop, c_insert,
+    c_integers, c_ket, c_leftslice, c_len, c_lenof, c_limit, c_loop,
+    c_maxint, c_minint, c_minus, c_minusassign, c_multiply,
+    c_multiplyassign, c_next, c_non, c_not, c_or, c_plus,
+    c_plusassign, c_repeat, c_reverse, c_rightslice, c_routines,
+    c_set, c_setlimit, c_setmark, c_size, c_sizeof, c_slicefrom,
+    c_sliceto, c_stringdef, c_stringescapes, c_strings, c_substring,
+    c_test, c_tolimit, c_tomark, c_true, c_try, c_unset,
 
-    c_mathassign,
+    /* These token values don't directly correspond to a keyword. */
     c_name,
     c_number,
     c_literalstring,
+
+    /* These token values are synthesised by the analyser. */
+    c_mathassign,
     c_neg,
     c_call,
     c_grouping,
     c_booltest,
+    c_functionend,
 
     NUM_TOKEN_CODES
 };
@@ -106,13 +142,19 @@ enum uplus_modes {
 struct tokeniser {
 
     struct input * next;
-    symbol * p;
+    byte * p;
     int c;
     char * file;
-    int file_needs_freeing;
+    // -1 : Release file with: lose_s((byte *)file)
+    //  0 : We don't own file.
+    //  1 : Release file with: free(file)
+    int file_owned;
     int line_number;
+
+    // Used for c_literalstring values.
     symbol * b;
-    symbol * b2;
+    // Used for c_name names.
+    byte * s;
     int number;
     int m_start;
     int m_end;
@@ -137,15 +179,15 @@ struct tokeniser {
     char token_disabled[NUM_TOKEN_CODES];
 };
 
-extern symbol * get_input(const char * filename);
-extern struct tokeniser * create_tokeniser(symbol * b, char * file);
+extern byte * get_input(const char * filename);
+extern struct tokeniser * create_tokeniser(byte * b, char * file);
 extern int read_token(struct tokeniser * t);
 extern const char * name_of_token(int code);
 extern void disable_token(struct tokeniser * t, int code);
 extern void close_tokeniser(struct tokeniser * t);
 
 extern int space_count;
-extern void * check_malloc(int n);
+extern void * check_malloc(size_t n);
 extern void check_free(void * p);
 
 struct node;
@@ -153,7 +195,7 @@ struct node;
 struct name {
 
     struct name * next;
-    symbol * b;
+    byte * s;
     int type;                   /* t_string etc */
     int mode;                   /*    )_  for routines, externals */
     struct node * definition;   /*    )                           */
@@ -199,7 +241,8 @@ struct among {
     int nocommand_count;      /* number of "no command" entries in this among */
     int function_count;       /* in this among */
     int amongvar_needed;      /* do we need to set among_var? */
-    struct node * starter;    /* i.e. among( (starter) 'string' ... ) */
+    int always_matches;       /* will this among always match? */
+    int shortest_size;        /* smallest non-zero string length in this among */
     struct node * substring;  /* i.e. substring ... among ( ... ) */
     struct node ** commands;  /* array with command_count entries */
 };
@@ -267,6 +310,7 @@ struct analyser {
     struct among * amongs_end;
     int among_count;
     int amongvar_needed;      /* used in reading routine definitions */
+    int among_with_function_count; /* number of amongs with functions */
     struct grouping * groupings;
     struct grouping * groupings_end;
     struct node * substring;  /* pending 'substring' in current routine definition */
@@ -315,7 +359,7 @@ struct generator {
     int copy_from_count; /* count of calls to copy_from() */
 
     const char * S[10];  /* strings */
-    symbol * B[10];      /* blocks */
+    byte * B[10];        /* byte blocks */
     int I[10];           /* integers */
     struct name * V[5];  /* variables */
     symbol * L[5];       /* literals, used in formatted write */
@@ -343,6 +387,7 @@ struct options {
     FILE * output_h;
     byte syntax_tree;
     byte comments;
+    byte js_esm;
     enc encoding;
     enum { LANG_JAVA, LANG_C, LANG_CPLUSPLUS, LANG_CSHARP, LANG_PASCAL, LANG_PYTHON, LANG_JAVASCRIPT, LANG_RUST, LANG_GO, LANG_ADA } make_lang;
     const char * externals_prefix;
@@ -366,9 +411,11 @@ extern void write_char(struct generator * g, int ch);
 extern void write_newline(struct generator * g);
 extern void write_string(struct generator * g, const char * s);
 extern void write_int(struct generator * g, int i);
+extern void write_hex4(struct generator * g, int ch);
 extern void write_symbol(struct generator * g, symbol s);
-extern void write_b(struct generator * g, symbol * b);
+extern void write_s(struct generator * g, const byte * b);
 extern void write_str(struct generator * g, struct str * str);
+extern void write_c_relop(struct generator * g, int relop);
 
 extern void write_comment_content(struct generator * g, struct node * p);
 extern void write_generated_comment_content(struct generator * g);
@@ -378,6 +425,10 @@ extern void write_start_comment(struct generator * g,
 
 extern int K_needed(struct generator * g, struct node * p);
 extern int repeat_restore(struct generator * g, struct node * p);
+extern int check_possible_signals_list(struct generator * g,
+                                       struct node * p,
+                                       int type,
+                                       int call_depth);
 
 /* Generator for C code. */
 extern void generate_program_c(struct generator * g);

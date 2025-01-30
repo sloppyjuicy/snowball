@@ -1,8 +1,8 @@
+#include <assert.h>
 #include <stdlib.h> /* for exit */
 #include <string.h> /* for strlen */
 #include <stdio.h> /* for fprintf etc */
 #include <ctype.h>
-#include <limits.h>
 #include "header.h"
 
 /* prototypes */
@@ -30,16 +30,19 @@ static struct str * vars_newname(struct generator * g) {
 
 static void write_varname(struct generator * g, struct name * p) {
 
-    int ch = p->b[0];
     if (p->type != t_external) {
         write_char(g, "SBIRXG"[p->type]);
         write_char(g, '_');
     }   
-    write_char(g, toupper(ch));
-    str_append_b_tail(g->outbuf, p->b, 1);
 
-    ch = p->b[SIZE(p->b) - 1];
-    if (ch == '_') {
+    {
+        char save_initial = p->s[0];
+        p->s[0] = toupper(save_initial);
+        str_append_s(g->outbuf, p->s);
+        p->s[0] = save_initial;
+    }
+
+    if (p->s[SIZE(p->s) - 1] == '_') {
         write_char(g, 'E');
     }
 }
@@ -76,13 +79,27 @@ static void write_margin(struct generator * g) {
     for (i = 0; i < g->margin; i++) write_string(g, "   ");
 }
 
+static void write_relop(struct generator * g, int relop) {
+    switch (relop) {
+	case c_eq: write_string(g, " = "); break;
+	case c_ne: write_string(g, " /= "); break;
+	case c_gt: write_string(g, " > "); break;
+	case c_ge: write_string(g, " >= "); break;
+	case c_lt: write_string(g, " < "); break;
+	case c_le: write_string(g, " <= "); break;
+	default:
+	    fprintf(stderr, "Unexpected type #%d in generate_integer_test\n", relop);
+	    exit(1);
+    }
+}
+
 /* Write a variable declaration. */
 static void write_declare(struct generator * g,
-                          char * declaration,
+                          const char * declaration,
                           struct node * p) {
     struct str * temp = g->outbuf;
     g->outbuf = g->declarations;
-    write_string(g, "   ");
+    write_string(g, "      ");
     writef(g, declaration, p);
     write_string(g, ";");
     write_newline(g);
@@ -120,7 +137,7 @@ static void write_savecursor(struct generator * g, struct node * p,
     g->B[0] = str_data(savevar);
     g->S[1] = "";
     if (p->mode != m_forward) g->S[1] = "Z.L - ";
-    write_declare(g, "   ~B0 : Char_Index", p);
+    write_declare(g, "~B0 : Char_Index", p);
     writef(g, "~M~B0 := ~S1Z.C;~N" , p);
 }
 
@@ -180,7 +197,7 @@ static void write_failure(struct generator * g) {
     g->unreachable = true;
 }
 
-static void write_failure_if(struct generator * g, char * s, struct node * p) {
+static void write_failure_if(struct generator * g, const char * s, struct node * p) {
 
     writef(g, "~Mif ", p);
     writef(g, s, p);
@@ -222,7 +239,7 @@ static void writef(struct generator * g, const char * input, struct node * p) {
             case '{': write_block_start(g); continue;
             case '}': write_block_end(g); continue;
             case 'S': write_string(g, g->S[input[i++] - '0']); continue;
-            case 'B': write_b(g, g->B[input[i++] - '0']); continue;
+            case 'B': write_s(g, g->B[input[i++] - '0']); continue;
             case 'I': write_int(g, g->I[input[i++] - '0']); continue;
             case 'V': write_varref(g, g->V[input[i++] - '0']); continue;
             case 'W': write_varname(g, g->V[input[i++] - '0']); continue;
@@ -234,34 +251,55 @@ static void writef(struct generator * g, const char * input, struct node * p) {
     }
 }
 
+static int need_c_var(struct node *p) {
+    while (p) {
+        switch (p->type) {
+            case c_attach:
+            case c_gopast:
+            case c_goto:
+            case c_grouping:
+            case c_hop:
+            case c_literalstring:
+            case c_next:
+            case c_non:
+                return 1;
+            case c_assign:
+                // Only uses variable C in forward mode.
+                if (p->mode == m_forward) return 1;
+                break;
+            case c_name:
+                if (p->name->type == t_string) return 1;
+                break;
+        }
+        if (p->left && need_c_var(p->left)) {
+            return 1;
+        }
+        if (p->aux && need_c_var(p->aux)) {
+            return 1;
+        }
+        p = p->right;
+    }
+    return 0;
+}
+
 static void w(struct generator * g, const char * s) {
-    writef(g, s, 0);
+    writef(g, s, NULL);
 }
 
 static int need_among_var(struct node *p) {
 
     while (p) {
-        if (p->type == c_substring || p->type == c_among) {
+        if (p->type == c_among) {
             return 1;
         }
-        if (p->right && need_among_var(p->right)) {
+        if (p->left && need_among_var(p->left)) {
             return 1;
         }
-        p = p->left;
+        if (p->aux && need_among_var(p->aux)) {
+            return 1;
+        }
+        p = p->right;
     }
-    return 0;
-}
-
-static int need_among_handler(struct among *a) {
-    int i;
-    struct amongvec * v = a->b;
-
-    for (i = 0; i < a->literalstring_count; i++, v++) {
-        if (v->function != 0) {
-            return 1;
-        }
-    }
-
     return 0;
 }
 
@@ -336,7 +374,7 @@ static void generate_and(struct generator * g, struct node * p) {
     while (p) {
         generate(g, p);
         if (g->unreachable) break;
-        if (keep_c && p->right != 0) write_restorecursor(g, p, savevar);
+        if (keep_c && p->right != NULL) write_restorecursor(g, p, savevar);
         p = p->right;
     }
     str_delete(savevar);
@@ -360,7 +398,7 @@ static void generate_or(struct generator * g, struct node * p) {
     p = p->left;
     str_clear(g->failure_str);
 
-    if (p == 0) {
+    if (p == NULL) {
         /* p should never be 0 after an or: there should be at least two
          * sub nodes. */
         fprintf(stderr, "Error: \"or\" node without children nodes.");
@@ -439,7 +477,7 @@ static void generate_not(struct generator * g, struct node * p) {
 
 
 static void generate_try(struct generator * g, struct node * p) {
-    struct str * savevar;
+    struct str * savevar = NULL;
     int keep_c = K_needed(g, p->left);
 
     g->failure_label = new_label(g);
@@ -533,16 +571,15 @@ static void generate_GO_grouping(struct generator * g, struct node * p, int is_g
     struct grouping * q = p->name->grouping;
     g->S[0] = p->mode == m_forward ? "" : "_Backward";
     g->S[1] = complement ? "In" : "Out";
-    g->S[2] = g->options->encoding == ENC_UTF8 ? "" : "";
     g->V[0] = p->name;
     g->I[0] = q->smallest_ch;
     g->I[1] = q->largest_ch;
     if (is_goto) {
-        writef(g, "~M~S1_Grouping~S0~S2 (Z, ~V0, ~I0, ~I1, True, C);", p);
+        writef(g, "~M~S1_Grouping~S0 (Z, ~V0, ~I0, ~I1, True, C);", p);
         write_failure_if(g, "C < 0", p);
     } else {
         writef(g, "~C"
-              "~M~S1_Grouping~S0~S2 (Z, ~V0, ~I0, ~I1, True, C);~N", p);
+              "~M~S1_Grouping~S0 (Z, ~V0, ~I0, ~I1, True, C);~N", p);
         write_failure_if(g, "C < 0", p);
         
         if (p->mode == m_forward)
@@ -621,15 +658,13 @@ static void generate_loop(struct generator * g, struct node * p) {
     struct str * loopvar = vars_newname(g);
     write_comment(g, p);
     g->B[0] = str_data(loopvar);
-    write_declare(g, "   ~B0 : Integer", p);
-    w(g, "~MFor ~B0 := ");
+    w(g, "~Mfor ~B0 in reverse 1 .. ");
     generate_AE(g, p->AE);
-    writef(g, " DownTo 1 Do~N", p);
-    writef(g, "~{", p);
+    writef(g, " loop~N~+", p);
 
     generate(g, p->left);
 
-    w(g, "~}");
+    w(g, "~-~Mend loop;~N");
     str_delete(loopvar);
     g->unreachable = false;
 }
@@ -649,7 +684,7 @@ static void generate_repeat_or_atleast(struct generator * g, struct node * p, st
     generate(g, p->left);
 
     if (!g->unreachable) {
-        if (loopvar != 0) {
+        if (loopvar != NULL) {
             g->B[0] = str_data(loopvar);
             w(g, "~M~B0 := ~B0 - 1;~N");
         }
@@ -679,7 +714,7 @@ static void generate_atleast(struct generator * g, struct node * p) {
     w(g, "~{");
     g->B[0] = str_data(loopvar);
 
-    write_declare(g, "   ~B0 : Integer", p);
+    write_declare(g, "~B0 : Integer", p);
     w(g, "~M~B0 := ");
     generate_AE(g, p->AE);
     w(g, ";~N");
@@ -723,20 +758,9 @@ static void generate_atmark(struct generator * g, struct node * p) {
 
 static void generate_hop(struct generator * g, struct node * p) {
     g->S[0] = p->mode == m_forward ? "" : "_Backward";
-    if (g->options->encoding == ENC_UTF8) {
-        w(g, "~MC := Skip_Utf8~S0 (Z, ");
-        generate_AE(g, p->AE); writef(g, ");~C~N", p);
-        write_failure_if(g, "C < 0", p);
-    } else {
-        w(g, "~MC := Z.C ~S0 ");
-        generate_AE(g, p->AE);
-        writef(g, ";~C~N", p);
-        if (p->mode == m_forward) {
-            write_failure_if(g, "C > Z.L or C < Z.C", p);
-        } else {
-            write_failure_if(g, "C < Z.Lb or C > Z.C", p);
-        }
-    }
+    w(g, "~MC := Skip_Utf8~S0 (Z, ");
+    generate_AE(g, p->AE); writef(g, ");~C~N", p);
+    write_failure_if(g, "C < 0", p);
     writef(g, "~MZ.C := C;~N", p);
 }
 
@@ -791,7 +815,7 @@ static void generate_sliceto(struct generator * g, struct node * p) {
 
 static void generate_address(struct generator * g, struct node * p) {
     symbol * b = p->literalstring;
-    if (b != 0) {
+    if (b != NULL) {
         write_literal_string(g, b);
     } else {
         write_varname(g, p->name);
@@ -837,7 +861,7 @@ static void generate_setlimit(struct generator * g, struct node * p) {
     struct str * varname = vars_newname(g);
 
     g->B[0] = str_data(varname);
-    write_declare(g, "   ~B0 : Integer", p);
+    write_declare(g, "~B0 : Integer", p);
     if (p->left && p->left->type == c_tomark) {
         /* Special case for:
          *
@@ -969,12 +993,12 @@ static void generate_dollar(struct generator * g, struct node * p) {
     str_delete(savevar);
 }
 
-static void generate_integer_assign(struct generator * g, struct node * p, char * s) {
+static void generate_integer_assign(struct generator * g, struct node * p, const char * s) {
 
     g->V[0] = p->name;
     w(g, "~M~V0 := ");
 
-    if (s != 0) {
+    if (s != NULL) {
         g->S[0] = s;
         w(g, "~V0 ~S0 ");
     }
@@ -983,38 +1007,60 @@ static void generate_integer_assign(struct generator * g, struct node * p, char 
     w(g, ";~N");
 }
 
-static void generate_integer_test(struct generator * g, struct node * p, char * s) {
+static void generate_integer_test(struct generator * g, struct node * p) {
 
-    w(g, "~Mif not (");
+    int relop = p->type;
+    int optimise_to_return = (g->failure_label == x_return && p->right && p->right->type == c_functionend);
+    if (optimise_to_return) {
+        w(g, "~MResult := (");
+        p->right = NULL;
+    } else {
+        w(g, "~Mif ");
+        // We want the inverse of the snowball test here.
+	relop ^= 1;
+    }
     generate_AE(g, p->left);
-    write_char(g, ' ');
-    write_string(g, s);
-    write_char(g, ' ');
+    write_relop(g, relop);
     generate_AE(g, p->AE);
-    w(g, ") then~+~N");
-    write_failure(g);
-    w(g, "~-~Mend if;~N");
-    g->unreachable = false;
-}
-
-static void generate_integer_function(struct generator * g, struct node * p, char * s) {
-
-    w(g, "~MResult := (");
-    generate_AE(g, p->left);
-    write_char(g, ' ');
-    write_string(g, s);
-    write_char(g, ' ');
-    generate_AE(g, p->AE);
-    w(g, ");~N");
-    g->unreachable = false;
+    if (optimise_to_return) {
+        w(g, ");~N");
+    } else {
+        w(g, " then~+~N");
+        write_failure(g);
+        w(g, "~-~Mend if;~N");
+        g->unreachable = false;
+    }
 }
 
 static void generate_call(struct generator * g, struct node * p) {
 
+    int signals = check_possible_signals_list(g, p->name->definition, c_define, 0);
     write_comment(g, p);
     g->V[0] = p->name;
-    writef(g, "~M~V0 (Z, Result);~N", p);
-    write_failure_if(g, "not Result", p);
+    if (g->failure_keep_count == 0 && g->failure_label == x_return) {
+        if (p->right && p->right->type == c_functionend) {
+            /* Tail call. */
+            writef(g, "~M~V0 (Z, Result);~N", p);
+            return;
+        }
+        if (signals == 0) {
+            /* Always fails. */
+            writef(g, "~M~V0 (Z, Result);~N", p);
+            w(g, "~Mreturn~N");
+            return;
+        }
+    }
+    if (signals == 1) {
+        /* Always succeeds. */
+        writef(g, "~M~V0 (Z, Result);~N", p);
+    } else if (signals == 0) {
+        /* Always fails. */
+        writef(g, "~M~V0 (Z, Result);~N", p);
+        write_failure(g);
+    } else {
+        writef(g, "~M~V0 (Z, Result);~N", p);
+        write_failure_if(g, "not Result", p);
+    }
 }
 
 static void generate_grouping(struct generator * g, struct node * p, int complement) {
@@ -1022,11 +1068,10 @@ static void generate_grouping(struct generator * g, struct node * p, int complem
     struct grouping * q = p->name->grouping;
     g->S[0] = p->mode == m_forward ? "" : "_Backward";
     g->S[1] = complement ? "Out_" : "In_";
-    g->S[2] = g->options->encoding == ENC_UTF8 ? "" : "";
     g->V[0] = p->name;
     g->I[0] = q->smallest_ch;
     g->I[1] = q->largest_ch;
-    writef(g, "~M~S1Grouping~S0~S2 (Z, ~V0, ~I0, ~I1, False, C);~N", p);
+    writef(g, "~M~S1Grouping~S0 (Z, ~V0, ~I0, ~I1, False, C);~N", p);
     write_failure_if(g, "C /= 0", p);
 }
 
@@ -1054,12 +1099,21 @@ static void generate_literalstring(struct generator * g, struct node * p) {
 }
 
 static void generate_define(struct generator * g, struct node * p) {
+    struct name * q = p->name;
+    if (q->type == t_routine && !q->used) return;
+
     struct str *saved_output;
     struct str *saved_declarations;
 
     /* Generate function header. */
-    g->V[0] = p->name;
+    g->V[0] = q;
     w(g, "~N~Mprocedure ~W0 (Z : in out Context_Type; Result : out Boolean) is~N");
+    if (need_c_var(p->left)) {
+        w(g, "~M~MC : Result_Index;~N");
+    }
+    if (need_among_var(p->left)) {
+        w(g, "~M~MA : Integer;~N");
+    }
 
     /* Save output*/
     saved_output = g->outbuf;
@@ -1076,23 +1130,15 @@ static void generate_define(struct generator * g, struct node * p) {
 
     /* Generate function body. */
     w(g, "~{");
-    switch (p->left->type) {
-        case c_eq:            generate_integer_function(g, p->left, "="); break;
-        case c_ne:            generate_integer_function(g, p->left, "/="); break;
-        case c_gr:            generate_integer_function(g, p->left, ">"); break;
-        case c_ge:            generate_integer_function(g, p->left, ">="); break;
-        case c_ls:            generate_integer_function(g, p->left, "<"); break;
-        case c_le:            generate_integer_function(g, p->left, "<="); break;
-        default:
-            generate(g, p->left);
-            if (!g->unreachable) w(g, "~N~MResult := True;~N");
-            str_append_string(saved_output, "      C : Result_Index;\n");
-            if (need_among_var(p->left) || 1) {
-                str_append_string(saved_output, "      A : Integer;\n");
-            }
-            break;
+    int signals = check_possible_signals_list(g, p->left, c_define, 0);
+    generate(g, p->left);
+    if (p->left->right) {
+        assert(p->left->right->type == c_functionend);
+        if (signals) {
+            generate(g, p->left->right);
+        }
     }
-    g->V[0] = p->name;
+    g->V[0] = q;
     w(g, "~-~Mend ~W0;~N");
 
     if (g->var_number) {
@@ -1106,6 +1152,11 @@ static void generate_define(struct generator * g, struct node * p) {
     g->outbuf = saved_output;
 }
 
+static void generate_functionend(struct generator * g, struct node * p) {
+    (void)p;
+    w(g, "~N~MResult := True;~N");
+}
+
 static void generate_substring(struct generator * g, struct node * p) {
     struct among * x = p->among;
     int block = -1;
@@ -1115,9 +1166,9 @@ static void generate_substring(struct generator * g, struct node * p) {
     int empty_case = -1;
     int n_cases = 0;
     symbol cases[2];
-    int shortest_size = INT_MAX;
+    int shortest_size = x->shortest_size;
     int call_done = 0;
-    int need_handler = need_among_handler(x);
+    int need_among_handler = (x->function_count > 0);
 
     write_comment(g, p);
 
@@ -1131,13 +1182,6 @@ static void generate_substring(struct generator * g, struct node * p) {
      * In backward mode, we can't match if there are fewer characters before
      * the current position than the minimum length.
      */
-    for (c = 0; c < x->literalstring_count; ++c) {
-        int size = among_cases[c].size;
-        if (size != 0 && size < shortest_size) {
-            shortest_size = size;
-        }
-    }
-
     for (c = 0; c < x->literalstring_count; ++c) {
         symbol ch;
         if (among_cases[c].size == 0) {
@@ -1226,12 +1270,14 @@ static void generate_substring(struct generator * g, struct node * p) {
              */
             g->I[4] = among_cases[empty_case].result;
             writef(g, "~MA := ~I4;~-~N~Melse~+~C", p);
-            if (need_handler) {
+            if (need_among_handler) {
                 writef(g, "~MFind_Among~S0 (Z, A_~I0, Among_String, Among_Handler'Access, A);~N", p);
             } else {
                 writef(g, "~MFind_Among~S0 (Z, A_~I0, Among_String, null, A);~N", p);
             }
-            write_failure_if(g, "A = 0", p);
+            if (!x->always_matches) {
+                write_failure_if(g, "A = 0", p);
+            }
             call_done = 1;
         } else {
             writef(g, "~f~C", p);
@@ -1244,12 +1290,14 @@ static void generate_substring(struct generator * g, struct node * p) {
     }
 
     if (!call_done) {
-        if (need_handler) {
+        if (need_among_handler) {
             writef(g, "~MFind_Among~S0 (Z, A_~I0, Among_String, Among_Handler'Access, A);~N", p);
         } else {
             writef(g, "~MFind_Among~S0 (Z, A_~I0, Among_String, null, A);~N", p);
         }
-        write_failure_if(g, "A = 0", p);
+        if (!x->always_matches) {
+            write_failure_if(g, "A = 0", p);
+        }
     }
 }
 
@@ -1257,9 +1305,7 @@ static void generate_among(struct generator * g, struct node * p) {
 
     struct among * x = p->among;
 
-    if (x->substring == 0) generate_substring(g, p);
-
-    if (x->starter != 0) generate(g, x->starter);
+    if (x->substring == NULL) generate_substring(g, p);
 
     if (x->command_count == 1 && x->nocommand_count == 0) {
         /* Only one outcome ("no match" already handled). */
@@ -1355,12 +1401,14 @@ static void generate(struct generator * g, struct node * p) {
         case c_minusassign:   generate_integer_assign(g, p, "-"); break;
         case c_multiplyassign:generate_integer_assign(g, p, "*"); break;
         case c_divideassign:  generate_integer_assign(g, p, "/"); break;
-        case c_eq:            generate_integer_test(g, p, "="); break;
-        case c_ne:            generate_integer_test(g, p, "/="); break;
-        case c_gr:            generate_integer_test(g, p, ">"); break;
-        case c_ge:            generate_integer_test(g, p, ">="); break;
-        case c_ls:            generate_integer_test(g, p, "<"); break;
-        case c_le:            generate_integer_test(g, p, "<="); break;
+        case c_eq:
+        case c_ne:
+        case c_gt:
+        case c_ge:
+        case c_lt:
+        case c_le:
+            generate_integer_test(g, p);
+            break;
         case c_call:          generate_call(g, p); break;
         case c_grouping:      generate_grouping(g, p, false); break;
         case c_non:           generate_grouping(g, p, true); break;
@@ -1372,6 +1420,7 @@ static void generate(struct generator * g, struct node * p) {
         case c_false:         generate_false(g, p); break;
         case c_true:          break;
         case c_debug:         generate_debug(g, p); break;
+        case c_functionend:   generate_functionend(g, p); break;
         default: fprintf(stderr, "%d encountered\n", p->type);
                  exit(1);
     }
@@ -1395,7 +1444,7 @@ static void generate_method_decl(struct generator * g, struct name * q) {
 static void generate_method_decls(struct generator * g, enum name_types type) {
     struct name * q;
     struct among * a = g->analyser->amongs;
-    int need_handler = 0;
+    int need_among_handler = 0;
 
     for (q = g->analyser->names; q; q = q->next) {
         if ((enum name_types)q->type == type) {
@@ -1403,41 +1452,22 @@ static void generate_method_decls(struct generator * g, enum name_types type) {
         }
     }
 
-    while (a != 0 && need_handler == 0) {
-        need_handler = need_among_handler(a);
+    while (a != NULL && need_among_handler == 0) {
+        need_among_handler = (a->function_count > 0);
         a = a->next;
     }
-    if (need_handler) {
+    if (need_among_handler) {
         w(g, "~N~Mprocedure Among_Handler (Context : in out Stemmer.Context_Type'Class; Operation : in Operation_Index; Result : out Boolean);~N");
     }
 }
 
-static int has_string_variable(struct generator * g) {
-    struct name * q;
-    for (q = g->analyser->names; q; q = q->next) {
-        g->V[0] = q;
-        if (q->type == t_string) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
 static void generate_member_decls(struct generator * g) {
-    struct name * q;
-    int count = 0;
-
-    
-    for (q = g->analyser->names; q; q = q->next) {
-        if (q->type == t_string || q->type == t_integer || q->type == t_boolean)
-            count++;
-    }
-
     w(g, "   type Context_Type is new Stemmer.Context_Type with");
-    if (count > 0) {
+    if (g->analyser->name_count[t_string] > 0 ||
+        g->analyser->name_count[t_integer] > 0 ||
+        g->analyser->name_count[t_boolean] > 0) {
         w(g, " record~N~+");
-        for (q = g->analyser->names; q; q = q->next) {
+        for (struct name * q = g->analyser->names; q; q = q->next) {
             g->V[0] = q;
             switch (q->type) {
                 case t_string:
@@ -1513,7 +1543,7 @@ static int generate_among_table(struct generator * g, struct among * x, int star
         w(g, "~I2, ");
 
         /* Write among's handler. */
-        if (v->function == 0) {
+        if (v->function == NULL) {
             w(g, "0)");
         } else {
             *operation = *operation + 1;
@@ -1535,7 +1565,7 @@ static int generate_amongs(struct generator * g) {
     
     w(g, "~MAmong_String : constant String := ~+");
     count = 0;
-    while (a != 0) {
+    while (a != NULL) {
         count = generate_among_string(g, a, count);
         a = a->next;
     }
@@ -1544,7 +1574,7 @@ static int generate_amongs(struct generator * g) {
     int operation = 0;
     start_pos = 1;
     a = g->analyser->amongs;
-    while (a != 0) {
+    while (a != NULL) {
         start_pos = generate_among_table(g, a, start_pos, &operation);
         a = a->next;
     }
@@ -1557,7 +1587,7 @@ static int generate_constructor(struct generator * g) {
 
 static void generate_methods(struct generator * g) {
     struct node * p = g->analyser->program;
-    while (p != 0) {
+    while (p != NULL) {
         generate(g, p);
         p = p->right;
     }
@@ -1572,10 +1602,10 @@ static int generate_operations_dispatcher(struct generator * g) {
     w(g, "~Mbegin~+~N~M");
     w(g, "case Operation is~+~N~M");
     a = g->analyser->amongs;
-    while (a != 0) {
+    while (a != NULL) {
         struct amongvec * v = a->b;
         for (i = 0; i < a->literalstring_count; i++, v++) {
-            if (v->function != 0) {
+            if (v->function != NULL) {
                 operation++;
                 g->I[2] = operation;
                 w(g, "when ~I2 =>~N~M");
@@ -1683,7 +1713,7 @@ extern void generate_program_ada(struct generator * g) {
 
     g->margin = 0;
     write_start_comment(g, "--  ", NULL);
-    if (has_string_variable(g)) {
+    if (g->analyser->name_count[t_string]) {
         w(g, "private with Ada.Strings.Unbounded;~N");
     }
     w(g, "package Stemmer.");

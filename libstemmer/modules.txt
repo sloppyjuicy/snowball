@@ -16,6 +16,7 @@ catalan         UTF_8,ISO_8859_1        catalan,ca,cat
 danish          UTF_8,ISO_8859_1        danish,da,dan
 dutch           UTF_8,ISO_8859_1        dutch,nl,dut,nld
 english         UTF_8,ISO_8859_1        english,en,eng
+estonian        UTF_8                   estonian,et,est
 finnish         UTF_8,ISO_8859_1        finnish,fi,fin
 french          UTF_8,ISO_8859_1        french,fr,fre,fra
 german          UTF_8,ISO_8859_1        german,de,ger,deu
@@ -50,9 +51,6 @@ porter          UTF_8,ISO_8859_1        porter			english
 # this.) They are included in the snowball website as curiosities, but are not
 # intended for general use, and use of them is is not fully supported.  These
 # algorithms are:
-#
-# german2          - This is a slight modification of the german stemmer.
-#german2          UTF_8,ISO_8859_1        german2		german
 #
 # kraaij_pohlmann  - This is a different dutch stemmer.
 #kraaij_pohlmann  UTF_8,ISO_8859_1        kraaij_pohlmann	dutch
